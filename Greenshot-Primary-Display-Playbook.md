@@ -1,124 +1,110 @@
-# Windows Print Screen — Primary Monitor Only (Greenshot)
+# Greenshot Primary Display Playbook
 
-Capturing only the primary monitor with Print Screen, while keeping full region/window snipping available. Works with multi-monitor setups including negative-coordinate displays (secondary to the left of primary).
+Capture only the primary monitor with Print Screen — dynamically detects resolution so it survives display resizes (Parsec, RDP, resolution changes). Keeps region/window snipping available via Greenshot.
 
 ## Quick Reference
 
-| Key | Action |
-|---|---|
-| **PrtScn** | Capture primary monitor only → clipboard + Desktop PNG |
-| **Ctrl + PrtScn** | Region snipping (drag to select) |
-| **Alt + PrtScn** | Active window capture |
+| Key | Action | Handled by |
+|---|---|---|
+| **PrtScn** | Capture primary monitor only → clipboard | PowerShell background script |
+| **Ctrl + PrtScn** | Windows Snipping Tool (region) | PowerShell background script |
+| **Alt + PrtScn** | Active window capture | Greenshot |
 
-## Why Greenshot vs Native Windows
+## Architecture
 
-- Windows `PrtScn` always captures ALL monitors into one wide bitmap — no native way to limit to primary only
-- Windows `Win+Shift+S` opens Snipping Tool (requires manual region selection every time)
-- Greenshot is open-source, lightweight, and gives per-key binding with fixed-region capture
+Two pieces work together:
 
-## Full Setup Process
+1. **PowerShell background script** — registers PrtScn as a global hotkey, captures primary monitor dynamically every press (no hardcoded resolution)
+2. **Greenshot** — handles Alt+PrtScn (window capture) and optional manual region capture from tray icon
 
-### 1. Disable Snipping Tool Print Screen Hijack
+Greenshot's own PrtScn binding is **disabled** — the PowerShell script owns PrtScn to ensure primary-only capture regardless of monitor configuration.
 
-Windows 10/11 hijacks `PrtScn` to open Snipping Tool by default. Disable it:
+## Setup
 
-```
+### 1. Disable Snipping Tool Print Screen hijack
+
+```cmd
 reg add "HKCU\Control Panel\Keyboard" /v PrintScreenKeyForSnippingEnabled /t REG_DWORD /d 0 /f
 ```
 
 ### 2. Install Greenshot
 
-Download from: https://getgreenshot.org/downloads/
+Download from https://getgreenshot.org/downloads/
 
-Silent install:
-```bash
+```cmd
 Greenshot-INSTALLER-1.3.315-RELEASE.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 ```
 
-### 3. Configure Greenshot
+### 3. Configure Greenshot (free PrtScn for PowerShell)
 
-Greenshot settings live at `%APPDATA%\Greenshot\Greenshot.ini`.
-
-#### Core hotkey mapping
+Edit `%APPDATA%\Greenshot\Greenshot.ini`:
 
 ```ini
-; PrtScn = capture last region (set to primary monitor bounds)
 RegionHotkey=Ctrl + PrintScreen
 WindowHotkey=Alt + PrintScreen
 FullscreenHotkey=None
-LastregionHotkey=PrintScreen
+LastregionHotkey=None
 ```
 
-#### Fixed region = primary monitor bounds
+### 4. Install the PowerShell capture script
 
-Set the "last captured region" to match your primary monitor resolution:
+Save `CapturePrimary.ps1` to a permanent location (e.g., `C:\Users\%USERNAME%\playbooks\`).
 
-```ini
-LastCapturedRegion=0,0,1920,1080
-```
+The script:
+- Registers PrtScn as a global hotkey using Win32 `RegisterHotKey`
+- On every press, queries `[System.Windows.Forms.Screen]::PrimaryScreen.Bounds` dynamically
+- Captures that exact region to clipboard
+- Also binds Ctrl+PrtScn to Windows Snipping Tool
 
-Replace `1920,1080` with your primary monitor's actual resolution. Find it via:
-```powershell
-Add-Type -AssemblyName System.Windows.Forms
-[System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-```
+### 5. Auto-start both
 
-#### Capture settings
+#### Greenshot
+Create shortcut in `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\`:
+- Target: `%LOCALAPPDATA%\Programs\Greenshot\Greenshot.exe`
 
-```ini
-CaptureMousepointer=True
-CaptureDelay=100
-OutputFilePath=C:\Users\%USERNAME%\Desktop
-OutputFileFormat=png
-OutputFileCopyPathToClipboard=True
-```
+#### PowerShell capture script
+Create shortcut in the same Startup folder:
+- Target: `powershell.exe`
+- Arguments: `-WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\Users\%USERNAME%\playbooks\CapturePrimary.ps1"`
 
-### 4. Auto-start with Windows
+### 6. Start immediately
 
-Create a shortcut in the Startup folder:
-```
-%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Greenshot.lnk
-```
-Target: `%LOCALAPPDATA%\Programs\Greenshot\Greenshot.exe`
-
-### 5. Restart Greenshot
-
-```bash
-taskkill /F /IM Greenshot.exe
+```cmd
 start "" "%LOCALAPPDATA%\Programs\Greenshot\Greenshot.exe"
+powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File "C:\Users\%USERNAME%\playbooks\CapturePrimary.ps1"
 ```
 
-## Why Fixed Region Instead of Screen Detection
+## Why This Approach
 
-Greenshot's `ScreenCaptureMode=Fixed` + `ScreenToCapture=N` uses internal screen enumeration that can break with:
-- Monitors at negative coordinates (secondary to the left of primary)
-- Different display adapters (dual GPU setups)
-- Some Windows 11 builds
+Greenshot's built-in `ScreenCaptureMode=Fixed` + `ScreenToCapture=N` has two failure modes:
 
-The "capture last region" approach (`LastregionHotkey`) with a preset `LastCapturedRegion` matching the primary monitor bounds bypasses screen detection entirely — it captures that exact pixel region every time.
+1. **Wrong screen ordering** — with negative-coordinate secondary displays (left of primary), Greenshot's internal monitor enumeration doesn't match .NET's `Screen.AllScreens` ordering, leading to `IndexOutOfRangeException` or capturing the wrong monitor
+2. **Hardcoded resolution** — using `LastCapturedRegion` with a fixed pixel region breaks when the primary monitor changes resolution (Parsec, RDP, display scaling changes)
+
+The PowerShell script avoids both: it calls `.NET`'s `PrimaryScreen.Bounds` every single press, so it always captures exactly what Windows considers the primary display at that moment.
 
 ## Troubleshooting
 
-**PrtScn captures wrong screen or all monitors:**
-Check that `FullscreenHotkey=None` (not `PrintScreen`) — otherwise the fullscreen capture overrides the region capture.
+**PrtScn does nothing:**
+- Verify the PowerShell script is running: `tasklist | findstr powershell`
+- Check Greenshot isn't also bound to PrtScn: verify `FullscreenHotkey=None` and `LastregionHotkey=None` in `Greenshot.ini`
+- Restart the script: kill powershell processes, re-run step 6
 
-**IndexOutOfRangeException in Greenshot:**
-Means Greenshot's internal screen list doesn't match what you set in `ScreenToCapture`. Switch to the fixed-region approach above.
+**Greenshot not responding:**
+- Kill and restart after config changes (reads `.ini` at startup only)
 
-**Greenshot not responding to PrtScn:**
-- Kill and restart Greenshot after config changes (it reads `.ini` at startup only)
-- Check no other tool is registered for the same hotkey
-- Verify the registry key from step 1 is still `0`
-
-**Want different output location:**
-Change `OutputFilePath` in the `.ini`. Supports environment variables.
+**Both Greenshot and script fighting over Ctrl+PrtScn:**
+- Set Greenshot's `RegionHotkey` to something unused or `None`
 
 ## Uninstall
 
-```bash
+```cmd
 taskkill /F /IM Greenshot.exe
-# Standard Windows uninstall, or:
+taskkill /F /IM powershell.exe
+# Uninstall Greenshot via Windows, or:
 "%LOCALAPPDATA%\Programs\Greenshot\unins000.exe" /VERYSILENT
 # Re-enable Snipping Tool PrtScn:
 reg add "HKCU\Control Panel\Keyboard" /v PrintScreenKeyForSnippingEnabled /t REG_DWORD /d 1 /f
+# Remove startup shortcuts from:
+# %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\
 ```
